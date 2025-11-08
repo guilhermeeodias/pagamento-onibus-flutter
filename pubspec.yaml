@@ -1,0 +1,32 @@
+name: demo_onibus
+description: "Demo de pagamento via Bluetooth"
+publish_to: 'none'
+
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.0.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  cupertino_icons: ^1.0.2
+  
+  # BLE Peripheral (Motorista - servidor BLE)
+  ble_peripheral: ^2.0.0
+  
+  # Flutter Blue Plus (Passageiro - cliente BLE)
+  flutter_blue_plus: ^1.32.12
+  
+  # Permissões
+  permission_handler: ^11.3.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+
+  flutter_lints: ^2.0.0
+
+flutter:
+  uses-material-design: true
