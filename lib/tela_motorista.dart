@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:ble_peripheral/ble_peripheral.dart';
 import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:demo_onibus/main.dart';
 
 const String serviceUuid = "0000180D-0000-1000-8000-00805F9B34FB";
 const String pingPagamentoUuid = "0000180A-0000-1000-8000-00805F9B34FB";
@@ -15,7 +16,7 @@ class TelaMotorista extends StatefulWidget {
 }
 
 class _TelaMotoristaState extends State<TelaMotorista>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   
   String statusTexto = "Iniciando validador...";
   Color statusCor = Colors.grey;
@@ -24,23 +25,39 @@ class _TelaMotoristaState extends State<TelaMotorista>
 
   List<Map<String, dynamic>> pagamentosRecebidos = [];
   StreamSubscription? _scanResultsSubscription;
+  StreamSubscription? _adapterStateSubscription; // <-- ADICIONADO
   
-  final Map<String, DateTime> _pagamentosProcessados = {};
+  // A CHAVE (String) agora é o Device ID, não o nome
+  final Map<String, DateTime> _pagamentosProcessados = {}; 
+  
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     
+    _pulseController = AnimationController(
+      duration: const Duration(milliseconds: 1500),
+      vsync: this,
+    )..repeat(reverse: true);
+    
+    _pulseAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) {
-        iniciarValidadorEOuvinte();
+        // MUDANÇA: Agora chamamos o listener primeiro
+        _setupBleListeners();
       }
     });
   }
 
   @override
   void dispose() {
+    _pulseController.dispose();
     WidgetsBinding.instance.removeObserver(this);
     _pararBLE();
     super.dispose();
@@ -48,16 +65,19 @@ class _TelaMotoristaState extends State<TelaMotorista>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && !bleAtivo && !tentandoIniciar) {
+    if (state == AppLifecycleState.resumed && !bleAtivo) {
       Future.delayed(const Duration(milliseconds: 300), () {
         if (mounted) {
-          iniciarValidadorEOuvinte();
+          // MUDANÇA: Usamos o listener
+          _setupBleListeners();
         }
       });
     }
   }
 
   Future<void> _pararBLE() async {
+    _adapterStateSubscription?.cancel(); // <-- ADICIONADO
+    _scanResultsSubscription?.cancel();
     try {
       if (bleAtivo) {
         await BlePeripheral.stopAdvertising();
@@ -67,42 +87,83 @@ class _TelaMotoristaState extends State<TelaMotorista>
       print("Erro ao parar BLE: $e");
     }
     bleAtivo = false;
-    _scanResultsSubscription?.cancel();
   }
 
-  Future<void> iniciarValidadorEOuvinte() async {
-    if (tentandoIniciar || bleAtivo) return;
+  // --- NOVA FUNÇÃO ---
+  // Esta função ouve o estado do Bluetooth e reage
+  Future<void> _setupBleListeners() async {
+    if (tentandoIniciar) return; // Já estamos tentando
     tentandoIniciar = true;
 
+    if (!mounted) return;
+    setState(() {
+      statusTexto = "Verificando permissões...";
+      statusCor = Colors.orange;
+    });
+
+    final statuses = await [
+      Permission.location,
+      Permission.bluetoothScan,
+      Permission.bluetoothAdvertise,
+      Permission.bluetoothConnect,
+    ].request();
+
+    if (!mounted) {
+      tentandoIniciar = false;
+      return;
+    }
+
+    if (!statuses.values.every((status) => status.isGranted)) {
+      setState(() {
+        statusTexto = "Permissões Necessárias\n\n• Bluetooth\n• Localização";
+        statusCor = Colors.red;
+      });
+      tentandoIniciar = false;
+      return;
+    }
+    
+    tentandoIniciar = false; // Verificação de permissão concluída
+
+    // Agora, ouça o estado do Bluetooth
+    _adapterStateSubscription?.cancel(); // Cancela qualquer listener antigo
+    _adapterStateSubscription = FlutterBluePlus.adapterState.listen((state) {
+      if (!mounted) return;
+      if (state == BluetoothAdapterState.on) {
+        if (!bleAtivo) { // Só inicie se não estiver ativo
+           _iniciarValidadorEOuvinte();
+        }
+      } else {
+        // Bluetooth foi desligado
+        if (bleAtivo) { // Se estávamos ativos, pare tudo
+           _pararBLE();
+        }
+        setState(() {
+          statusTexto = "Bluetooth desligado\n\nPor favor, ative o Bluetooth";
+          statusCor = Colors.orange;
+          bleAtivo = false; // Garante que o estado seja 'off'
+        });
+      }
+    });
+  }
+
+  // --- FUNÇÃO MODIFICADA ---
+  // Esta é a sua antiga 'iniciarValidadorEOuvinte', mas sem as permissões
+  // Ela assume que o Bluetooth JÁ ESTÁ LIGADO
+  Future<void> _iniciarValidadorEOuvinte() async {
+    if (bleAtivo) return; // Já está ativo
+    
     try {
       if (!mounted) return;
       setState(() {
-        statusTexto = "Verificando permissões...";
-        statusCor = Colors.orange;
-      });
-
-      final statuses = await [
-        Permission.location,
-        Permission.bluetoothScan,
-        Permission.bluetoothAdvertise,
-        Permission.bluetoothConnect,
-      ].request();
-
-      if (!mounted) return;
-
-      if (!statuses.values.every((status) => status.isGranted)) {
-        setState(() {
-          statusTexto = "⚠️ Permissões Necessárias\n\n• Bluetooth\n• Localização";
-          statusCor = Colors.red;
-        });
-        tentandoIniciar = false;
-        return;
-      }
-
-      setState(() {
-        statusTexto = "Inicializando validador...";
+        statusTexto = "Iniciando Validador";
         statusCor = Colors.blue;
       });
+
+      // Garantir que o estado é 'on'
+      var estadoBle = await FlutterBluePlus.adapterState.first;
+      if (estadoBle != BluetoothAdapterState.on) {
+         throw Exception("BLUETOOTH_NOT_ENABLED");
+      }
 
       await BlePeripheral.initialize();
       await BlePeripheral.clearServices();
@@ -119,11 +180,7 @@ class _TelaMotoristaState extends State<TelaMotorista>
         localName: "ValidadorOnibus",
       );
 
-      var estadoBle = await FlutterBluePlus.adapterState.first;
-      if (estadoBle != BluetoothAdapterState.on) {
-         throw Exception("BLUETOOTH_NOT_ENABLED");
-      }
-
+      // --- CORREÇÃO DE DUPLICIDADE APLICADA AQUI ---
       _scanResultsSubscription = FlutterBluePlus.onScanResults.listen(
         (results) {
           if (!mounted) return;
@@ -131,19 +188,29 @@ class _TelaMotoristaState extends State<TelaMotorista>
             if (r.advertisementData.serviceUuids.contains(Guid(pingPagamentoUuid))) {
               
               String nomePassageiro = r.advertisementData.advName;
+              String deviceId = r.device.remoteId.str; // <-- FIX 1: Usar ID do Dispositivo
+
+              // FIX 2: Ignorar se o nome for o do próprio validador
+              if (nomePassageiro == "ValidadorOnibus") {
+                continue; 
+              }
+
               if (nomePassageiro.isEmpty) {
                 nomePassageiro = "Passageiro";
               }
 
               final agora = DateTime.now();
-              final ultimoProcessamento = _pagamentosProcessados[nomePassageiro];
+              // FIX 3: Usar deviceId como chave no mapa
+              final ultimoProcessamento = _pagamentosProcessados[deviceId]; 
               
               if (ultimoProcessamento != null && 
                   agora.difference(ultimoProcessamento).inSeconds < 3) {
+                // Este DISPOSITIVO específico já pagou nos últimos 3s
                 continue;
               }
 
-              _pagamentosProcessados[nomePassageiro] = agora;
+              // FIX 4: Salvar o processamento usando o deviceId
+              _pagamentosProcessados[deviceId] = agora; 
               
               if (mounted) {
                 setState(() {
@@ -175,36 +242,31 @@ class _TelaMotoristaState extends State<TelaMotorista>
       if (!mounted) return;
       bleAtivo = true;
       setState(() {
-        statusTexto = "✅ Validador Ativo\n\nAguardando pagamentos...";
+        statusTexto = "Validador Ativo\n\nAguardando pagamentos...";
         statusCor = Colors.green;
       });
 
     } catch (e) {
       if (!mounted) return;
-      await FlutterBluePlus.stopScan();
+      await _pararBLE(); // Pare tudo se der erro
+      
       String erro = e.toString();
       bleAtivo = false;
 
       if (erro.contains('BLUETOOTH_NOT_ENABLED') || erro.contains('disabled')) {
         setState(() {
-          statusTexto = "🔵 Bluetooth desligado\n\nPor favor, ative o Bluetooth";
+          statusTexto = "Bluetooth desligado\n\nPor favor, ative o Bluetooth";
           statusCor = Colors.orange;
-        });
-        tentandoIniciar = false;
-        Future.delayed(const Duration(seconds: 2), () {
-          if (mounted && !bleAtivo) {
-            iniciarValidadorEOuvinte();
-          }
         });
       } else {
         setState(() {
           statusTexto = "ERRO ao ligar o validador:\n$e";
           statusCor = Colors.red;
         });
-        tentandoIniciar = false;
       }
     }
   }
+
 
   String _formatarHora(DateTime data) {
     return '${data.hour.toString().padLeft(2, '0')}:${data.minute.toString().padLeft(2, '0')}:${data.second.toString().padLeft(2, '0')}';
@@ -212,6 +274,11 @@ class _TelaMotoristaState extends State<TelaMotorista>
 
   @override
   Widget build(BuildContext context) {
+    // ... (O RESTO DO SEU MÉTODO build CONTINUA IGUAL)
+    // ... (NENHUMA MUDANÇA DAQUI PARA BAIXO)
+    final isDark = AppTheme.isDark(context);
+    final bool isActive = statusCor == Colors.green;
+    
     return PopScope(
       canPop: true,
       onPopInvokedWithResult: (didPop, result) {
@@ -220,152 +287,366 @@ class _TelaMotoristaState extends State<TelaMotorista>
         }
       },
       child: Scaffold(
-        appBar: AppBar(
-          title: const Text('Modo Motorista'),
-          backgroundColor: statusCor,
-          foregroundColor: Colors.white,
-        ),
-        body: AnimatedContainer(
-          duration: const Duration(milliseconds: 500),
-          color: statusCor,
-          child: SafeArea(
-            child: Column(
-              children: [
-                Expanded(
-                  flex: statusCor == Colors.green ? 2 : 3,
-                  child: Center(
-                    child: SingleChildScrollView(
-                      padding: const EdgeInsets.all(30.0),
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          if (statusCor == Colors.green)
-                            const Icon(Icons.check_circle_outline,
-                                size: 80, color: Colors.white),
-                          if (statusCor == Colors.orange || statusCor == Colors.blue)
-                            const SizedBox(
-                              width: 60,
-                              height: 60,
-                              child: CircularProgressIndicator(
-                                  color: Colors.white, strokeWidth: 6),
+        backgroundColor: isActive 
+            ? (isDark ? const Color(0xFF064e3b) : const Color(0xFFd1fae5))
+            : AppTheme.backgroundColor(context),
+        body: SafeArea(
+          child: Column(
+            children: [
+              // Header
+              Padding(
+                padding: const EdgeInsets.all(16),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? (isDark ? const Color(0xFF065f46) : Colors.white)
+                            : AppTheme.cardColor(context),
+                        borderRadius: BorderRadius.circular(10),
+                        border: !isDark && !isActive ? Border.all(
+                          color: const Color(0xFFE2E8F0),
+                          width: 1,
+                        ) : null,
+                      ),
+                      child: IconButton(
+                        icon: Icon(
+                          Icons.arrow_back,
+                          color: isActive
+                              ? (isDark ? Colors.white : const Color(0xFF065f46))
+                              : AppTheme.textColor(context),
+                          size: 20,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onPressed: () => Navigator.pop(context),
+                      ),
+                    ),
+                    const Expanded(
+                      child: Center(
+                        child: Text(
+                          'Modo Motorista',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
+                    ),
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? (isDark ? const Color(0xFF065f46) : Colors.white)
+                            : AppTheme.cardColor(context),
+                        borderRadius: BorderRadius.circular(10),
+                        border: !isDark && !isActive ? Border.all(
+                          color: const Color(0xFFE2E8F0),
+                          width: 1,
+                        ) : null,
+                      ),
+                      child: Icon(
+                        Icons.settings_outlined,
+                        color: isActive
+                            ? (isDark ? const Color(0xFF6ee7b7) : const Color(0xFF059669))
+                            : AppTheme.textSecondaryColor(context),
+                        size: 20,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: isActive
+                            ? (isDark ? const Color(0xFF065f46) : Colors.white)
+                            : AppTheme.cardColor(context),
+                        borderRadius: BorderRadius.circular(10),
+                        border: !isDark && !isActive ? Border.all(
+                          color: const Color(0xFFE2E8F0),
+                          width: 1,
+                        ) : null,
+                      ),
+                      child: IconButton(
+                        icon: Icon(
+                          isDark ? Icons.light_mode : Icons.dark_mode,
+                          color: isActive
+                              ? (isDark ? const Color(0xFF6ee7b7) : const Color(0xFF059669))
+                              : AppTheme.textSecondaryColor(context),
+                          size: 20,
+                        ),
+                        padding: EdgeInsets.zero,
+                        onPressed: () {
+                          setState(() {
+                            AppTheme.toggleTheme();
+                          });
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              
+              // Status do validador
+              Expanded(
+                flex: statusCor == Colors.green ? 1 : 2,
+                child: Center(
+                  child: SingleChildScrollView(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 20),
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (statusCor == Colors.green)
+                          AnimatedBuilder(
+                            animation: _pulseAnimation,
+                            builder: (context, child) {
+                              return Transform.scale(
+                                scale: _pulseAnimation.value,
+                                child: Container(
+                                  width: 120,
+                                  height: 120,
+                                  decoration: BoxDecoration(
+                                    gradient: LinearGradient(
+                                      colors: isDark
+                                          ? [const Color(0xFF10b981), const Color(0xFF059669)]
+                                          : [const Color(0xFF34d399), const Color(0xFF10b981)],
+                                    ),
+                                    shape: BoxShape.circle,
+                                    boxShadow: [
+                                      BoxShadow(
+                                        color: const Color(0xFF10b981).withAlpha(102),
+                                        blurRadius: 30,
+                                        spreadRadius: 10,
+                                      ),
+                                    ],
+                                  ),
+                                  child: const Icon(
+                                    Icons.shield_rounded,
+                                    size: 60,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              );
+                            },
+                          )
+                        else if (statusCor == Colors.blue || statusCor == Colors.orange)
+                          const SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: CircularProgressIndicator(
+                              color: AppTheme.primaryBlue,
+                              strokeWidth: 4,
                             ),
-                          if (statusCor == Colors.red)
-                            const Icon(Icons.error_outline,
-                                size: 80, color: Colors.white),
-                          const SizedBox(height: 30),
-                          Text(
-                            statusTexto,
-                            textAlign: TextAlign.center,
-                            style: const TextStyle(
-                              fontSize: 22,
-                              fontWeight: FontWeight.bold,
+                          )
+                        else
+                          Container(
+                            width: 80,
+                            height: 80,
+                            decoration: const BoxDecoration(
+                              color: AppTheme.errorRed,
+                              shape: BoxShape.circle,
+                            ),
+                            child: const Icon(
+                              Icons.error_outline,
+                              size: 40,
                               color: Colors.white,
-                              height: 1.5,
                             ),
                           ),
-                          if (statusCor == Colors.red) ...[
-                            const SizedBox(height: 30),
-                            ElevatedButton.icon(
-                              onPressed: () {
-                                bleAtivo = false;
-                                tentandoIniciar = false;
-                                iniciarValidadorEOuvinte();
-                              },
-                              icon: const Icon(Icons.refresh),
-                              label: const Text('Tentar Novamente'),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: Colors.white,
-                                foregroundColor: Colors.red,
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 30, vertical: 15),
-                              ),
+                        const SizedBox(height: 20),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 40),
+                          child: Text(
+                            statusTexto,
+                            textAlign: TextAlign.center,
+                            style: TextStyle(
+                              fontSize: 16,
+                              color: isActive
+                                  ? (isDark ? Colors.white : const Color(0xFF065f46))
+                                  : AppTheme.textColor(context),
+                              fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                              height: 1.4,
                             ),
-                          ],
-                        ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  ),
+                ),
+              ),
+              
+              // Lista de pagamentos
+              if (statusCor == Colors.green)
+                Expanded(
+                  flex: 2,
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: isDark 
+                          ? const Color(0xFF052e24)
+                          : const Color(0xFFa7f3d0),
+                      borderRadius: const BorderRadius.only(
+                        topLeft: Radius.circular(24),
+                        topRight: Radius.circular(24),
                       ),
+                    ),
+                    child: Column(
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.all(20),
+                          child: Row(
+                            children: [
+                              Container(
+                                width: 40,
+                                height: 40,
+                                decoration: BoxDecoration(
+                                  color: isDark 
+                                      ? const Color(0xFF065f46)
+                                      : Colors.white,
+                                  borderRadius: BorderRadius.circular(10),
+                                ),
+                                child: Icon(
+                                  Icons.receipt_long_outlined,
+                                  color: isDark 
+                                      ? const Color(0xFF6ee7b7)
+                                      : const Color(0xFF059669),
+                                  size: 20,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Text(
+                                'Pagamentos Recebidos',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.w600,
+                                  color: isDark 
+                                      ? Colors.white
+                                      : const Color(0xFF065f46),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        Expanded(
+                          child: pagamentosRecebidos.isEmpty
+                              ? Center(
+                                  child: Padding(
+                                    padding: const EdgeInsets.all(20),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Icons.hourglass_empty,
+                                          size: 48,
+                                          color: isDark 
+                                              ? const Color(0xFF059669)
+                                              : const Color(0xFF10b981),
+                                        ),
+                                        const SizedBox(height: 12),
+                                        Text(
+                                          'Nenhum pagamento ainda',
+                                          style: TextStyle(
+                                            color: isDark 
+                                                ? const Color(0xFF6ee7b7)
+                                                : const Color(0xFF047857),
+                                            fontSize: 14,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                )
+                              : ListView.builder(
+                                  padding: const EdgeInsets.only(
+                                    left: 16,
+                                    right: 16,
+                                    bottom: 16,
+                                  ),
+                                  itemCount: pagamentosRecebidos.length,
+                                  itemBuilder: (context, index) {
+                                    final pagamento = pagamentosRecebidos[index];
+                                    return Container(
+                                      margin: const EdgeInsets.only(bottom: 8),
+                                      padding: const EdgeInsets.all(16),
+                                      decoration: BoxDecoration(
+                                        color: isDark 
+                                            ? const Color(0xFF065f46)
+                                            : Colors.white,
+                                        borderRadius: BorderRadius.circular(12),
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Container(
+                                            width: 36,
+                                            height: 36,
+                                            decoration: BoxDecoration(
+                                              gradient: LinearGradient(
+                                                colors: isDark
+                                                    ? [const Color(0xFF10b981), const Color(0xFF059669)]
+                                                    : [const Color(0xFF34d399), const Color(0xFF10b981)],
+                                              ),
+                                              shape: BoxShape.circle,
+                                            ),
+                                            child: const Icon(
+                                              Icons.check,
+                                              color: Colors.white,
+                                              size: 20,
+                                            ),
+                                          ),
+                                          const SizedBox(width: 12),
+                                          Expanded(
+                                            child: Column(
+                                              crossAxisAlignment: CrossAxisAlignment.start,
+                                              children: [
+                                                Text(
+                                                  pagamento['nomeUsuario'] ?? 'Usuário',
+                                                  style: TextStyle(
+                                                    fontWeight: FontWeight.w600,
+                                                    fontSize: 15,
+                                                    color: isDark 
+                                                        ? Colors.white
+                                                        : const Color(0xFF065f46),
+                                                  ),
+                                                ),
+                                                const SizedBox(height: 2),
+                                                Text(
+                                                  _formatarHora(pagamento['dataHora']),
+                                                  style: TextStyle(
+                                                    color: isDark 
+                                                        ? const Color(0xFF6ee7b7)
+                                                        : const Color(0xFF059669),
+                                                    fontSize: 13,
+                                                  ),
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                          Text(
+                                            '+ R\$ ${pagamento['valor'].toStringAsFixed(2)}',
+                                            style: TextStyle(
+                                              fontWeight: FontWeight.bold,
+                                              fontSize: 15,
+                                              color: isDark 
+                                                  ? const Color(0xFF6ee7b7)
+                                                  : const Color(0xFF047857),
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                        ),
+                      ],
                     ),
                   ),
                 ),
-                if (statusCor == Colors.green)
-                  Expanded(
-                    flex: 3,
-                    child: Container(
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.1),
-                        borderRadius: const BorderRadius.only(
-                          topLeft: Radius.circular(30),
-                          topRight: Radius.circular(30),
-                        ),
-                      ),
-                      child: Column(
-                        children: [
-                          const Padding(
-                            padding: EdgeInsets.all(16.0),
-                            child: Text(
-                              'Pagamentos Recebidos',
-                              style: TextStyle(
-                                fontSize: 18,
-                                fontWeight: FontWeight.bold,
-                                color: Colors.white,
-                              ),
-                            ),
-                          ),
-                          Expanded(
-                            child: pagamentosRecebidos.isEmpty
-                                ? const Center(
-                                    child: Text(
-                                      'Nenhum pagamento ainda',
-                                      style: TextStyle(
-                                        color: Colors.white70,
-                                        fontSize: 16,
-                                      ),
-                                    ),
-                                  )
-                                : ListView.builder(
-                                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                                    itemCount: pagamentosRecebidos.length,
-                                    itemBuilder: (context, index) {
-                                      final pagamento = pagamentosRecebidos[index];
-                                      return Card(
-                                        color: Colors.white.withValues(alpha: 0.9),
-                                        margin: const EdgeInsets.only(bottom: 12),
-                                        child: ListTile(
-                                          leading: const CircleAvatar(
-                                            backgroundColor: Colors.green,
-                                            child: Icon(Icons.check, color: Colors.white),
-                                          ),
-                                          title: Text(
-                                            pagamento['nomeUsuario'] ?? 'Usuário',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
-                                            ),
-                                          ),
-                                          subtitle: Text(
-                                            _formatarHora(pagamento['dataHora']),
-                                            style: TextStyle(
-                                              color: Colors.grey[600],
-                                            ),
-                                          ),
-                                          trailing: Text(
-                                            'R\$ ${pagamento['valor'].toStringAsFixed(2)}',
-                                            style: const TextStyle(
-                                              fontWeight: FontWeight.bold,
-                                              fontSize: 16,
-                                              color: Colors.green,
-                                            ),
-                                          ),
-                                        ),
-                                      );
-                                    },
-                                  ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+            ],
           ),
         ),
       ),
